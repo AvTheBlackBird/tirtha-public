@@ -6,6 +6,11 @@ from pathlib import Path
 from subprocess import STDOUT, CalledProcessError, check_output
 from typing import Optional
 
+# .splat converter
+from plyfile import PlyData
+import numpy as np
+from io import BytesIO
+
 # ImageOps
 import cv2
 import pytz
@@ -763,7 +768,8 @@ class ImageOps:
 
 class TrainOps:
     """
-    Gaussia splatting pipeline
+    Runs the Gaussia splatting pipeline
+    Convert the .ply file to .splat file
 
     """
     def __init__(self, meshID: str, saving_iterations: int):
@@ -895,6 +901,66 @@ class TrainOps:
 
         optimization._run_all()
 
+    def convert(self):
+        
+        input_file = self.model_path / f"point_cloud/iteration_{GS_MAX_ITER}" / "point_cloud.ply"
+        output_file = self.model_path / f"point_cloud/iteration_{GS_MAX_ITER}"/ "point_cloud.splat"
+        
+        if not self.output_file.exists(): 
+            self.output_file.mkdir(parents=True, exist_ok=True)
+
+        def process_ply_to_splat(ply_file_path):
+
+            plydata = PlyData.read(ply_file_path)
+            vert = plydata["vertex"]
+            sorted_indices = np.argsort(
+                -np.exp(vert["scale_0"] + vert["scale_1"] + vert["scale_2"])
+                / (1 + np.exp(-vert["opacity"]))
+            )
+            buffer = BytesIO()
+            for idx in sorted_indices:
+                v = plydata["vertex"][idx]
+                position = np.array([v["x"], v["y"], v["z"]], dtype=np.float32)
+                scales = np.exp(
+                    np.array(
+                        [v["scale_0"], v["scale_1"], v["scale_2"]],
+                        dtype=np.float32,
+                    )
+                )
+                rot = np.array(
+                    [v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]],
+                    dtype=np.float32,
+                )
+                SH_C0 = 0.28209479177387814
+                color = np.array(
+                    [
+                        0.5 + SH_C0 * v["f_dc_0"],
+                        0.5 + SH_C0 * v["f_dc_1"],
+                        0.5 + SH_C0 * v["f_dc_2"],
+                        1 / (1 + np.exp(-v["opacity"])),
+                    ]
+                )
+                buffer.write(position.tobytes())
+                buffer.write(scales.tobytes())
+                buffer.write((color * 255).clip(0, 255).astype(np.uint8).tobytes())
+                buffer.write(
+                    ((rot / np.linalg.norm(rot)) * 128 + 128)
+                    .clip(0, 255)
+                    .astype(np.uint8)
+                    .tobytes()
+                )
+
+            return buffer.getvalue()
+        
+        def save_splat_file(splat_data, output_path):
+            with open(output_path, "wb") as f:
+                f.write(splat_data)
+
+        self.logger.info(f"Processing {input_file}...")
+        splat_data = process_ply_to_splat(input_file)
+        save_splat_file(splat_data, output_file)
+        self.logger.info(f"converted the .ply to .splat format: {output_file}")
+    
     def run_cleanup(self):
         """
         Does the following:
@@ -1040,6 +1106,7 @@ class TrainOps:
     def _run_all(self):
         self.preprocess()
         self.optimization()
+        self.convert()
         self.run_cleanup()
         self.run_ark()
 
