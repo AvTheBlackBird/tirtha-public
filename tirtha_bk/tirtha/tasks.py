@@ -3,7 +3,7 @@ from pathlib import Path
 from django.conf import settings
 
 # Local imports
-from tirtha.models import Contributor
+from tirtha.models import Contribution
 
 from .celery import app, crontab, get_task_logger
 from .utils import Logger
@@ -32,6 +32,7 @@ def post_save_contrib_imageops(contrib_id):
     cel_logger.info(
         f"post_save_contrib_imageops: Checking images for contrib_id: {contrib_id}..."
     )
+    cel_logger.info(Contribution.objects.get(ID=contrib_id))
     iops = ImageOps(contrib_id=contrib_id)
     # FIXME: TODO: Till the VRAM + concurrency issue is fixed, skipping image checks.
     iops.check_images()
@@ -44,80 +45,110 @@ def post_save_contrib_imageops(contrib_id):
 
     # FIXME: TODO: MESHOPS_CONTRIB_DELAY = 0.1 (6 minutes), till the image checks are fixed.
     # Create mesh after MESHOPS_CONTRIB_DELAY hours
+
+    #TODO: uncomment for alicevision pipeline
+    # cel_logger.info(
+    #     f"post_save_contrib_imageops: Will trigger MeshOps for {contrib_id} after {MESHOPS_CONTRIB_DELAY} hours..."
+    # )
+    # mo_runner_task.apply_async(
+    #     args=(contrib_id,), countdown=MESHOPS_CONTRIB_DELAY * 60 * 60
+    # )
+
     cel_logger.info(
-        f"post_save_contrib_imageops: Will trigger MeshOps for {contrib_id} after {MESHOPS_CONTRIB_DELAY} hours..."
+        f"post_save_contrib_imageops: Will trigger TrainOps for {contrib_id} after {MESHOPS_CONTRIB_DELAY} hours..."
     )
-    mo_runner_task.apply_async(
+
+    gs_runner_task.apply_async(
         args=(contrib_id,), countdown=MESHOPS_CONTRIB_DELAY * 60 * 60
     )
 
 
+# @app.task
+# def mo_runner_task(contrib_id):
+#     """
+#     Triggers `MeshOps`, when a `Run` instance is created.
+
+#     """
+#     from .workers import mo_runner, prerun_check
+
+#     cel_logger.info(f"mo_runner_task: Triggering MeshOps for contrib_id: {contrib_id}.")
+#     cel_logger.info(
+#         f"mo_runner_task: Running prerun checks for contrib_id: {contrib_id}..."
+#     )
+#     chk, msg = prerun_check(contrib_id)
+#     cel_logger.info(f"mo_runner_task: {contrib_id} - {msg}")
+#     if chk:
+#         cel_logger.info(f"mo_runner_task: Running MeshOps for {contrib_id}...")
+#         mo_runner(contrib_id=contrib_id)
+#         cel_logger.info(f"mo_runner_task: Finished running MeshOps for {contrib_id}.")
+
+
 @app.task
-def mo_runner_task(contrib_id):
+def gs_runner_task(contrib_id):
     """
-    Triggers `MeshOps`, when a `Run` instance is created.
+    Triggers `TrainOps`, when a `Run` instance is created.
 
     """
-    from .workers import mo_runner, prerun_check
+    from .workers import to_runner, prerun_check
 
-    cel_logger.info(f"mo_runner_task: Triggering MeshOps for contrib_id: {contrib_id}.")
+    cel_logger.info(f"to_runner_task: Triggering TrainOps for contrib_id: {contrib_id}.")
     cel_logger.info(
-        f"mo_runner_task: Running prerun checks for contrib_id: {contrib_id}..."
+        f"to_runner_task: Running prerun checks for contrib_id: {contrib_id}..."
     )
     chk, msg = prerun_check(contrib_id)
-    cel_logger.info(f"mo_runner_task: {contrib_id} - {msg}")
+    cel_logger.info(f"to_runner_task: {contrib_id} - {msg}")
     if chk:
-        cel_logger.info(f"mo_runner_task: Running MeshOps for {contrib_id}...")
-        mo_runner(contrib_id=contrib_id)
-        cel_logger.info(f"mo_runner_task: Finished running MeshOps for {contrib_id}.")
+        cel_logger.info(f"to_runner_task: Running TrainOps for {contrib_id}...")
+        to_runner(contrib_id=contrib_id)
+        cel_logger.info(f"to_runner_task: Finished running TrainOps for {contrib_id}.")
 
 
-@app.task
-def backup_task():
-    """
-    Backs up the database & media files using django-dbbackup.
+# @app.task
+# def backup_task():
+#     """
+#     Backs up the database & media files using django-dbbackup.
 
-    """
-    from django.core.management import call_command
+#     """
+#     from django.core.management import call_command
 
-    # Setup logger
-    bak_logger = Logger(name="db_backup", log_path=LOG_DIR)
+#     # Setup logger
+#     bak_logger = Logger(name="db_backup", log_path=LOG_DIR)
 
-    # Backup database & media files
-    bak_logger.info("backup_task: Backing up database & media files...")
-    cel_logger.info("backup_task: Backing up database & media files...")
-    call_command("dbbackup")  # LATE_EXP: Add other options
-    bak_logger.info("backup_task: Backed up database.")
-    call_command("mediabackup")  # LATE_EXP: Add other options
-    bak_logger.info("backup_task: Backed up media files.")
-    cel_logger.info("backup_task: Backed up database & media files.")
-
-
-@app.task
-def db_cleanup_task():
-    """
-    Cleans up the database.
-    - Removes contributors with no contributions.
-
-    """
-    cln_logger = Logger(name="db_cleanup", log_path=LOG_DIR)
-    cln_logger.info("db_cleanup_task: Cleaning up database...")
+#     # Backup database & media files
+#     bak_logger.info("backup_task: Backing up database & media files...")
+#     cel_logger.info("backup_task: Backing up database & media files...")
+#     call_command("dbbackup")  # LATE_EXP: Add other options
+#     bak_logger.info("backup_task: Backed up database.")
+#     call_command("mediabackup")  # LATE_EXP: Add other options
+#     bak_logger.info("backup_task: Backed up media files.")
+#     cel_logger.info("backup_task: Backed up database & media files.")
 
 
-@app.on_after_finalize.connect
-def setup_periodic_tasks(sender, **kwargs):
-    # Calls backup_task() every BACKUP_INTERVAL.
-    sender.add_periodic_task(BACKUP_INTERVAL, backup_task.s(), name="backup_task")
+# @app.task
+# def db_cleanup_task():
+#     """
+#     Cleans up the database.
+#     - Removes contributors with no contributions.
 
-    # Calls db_cleanup_task() every DBCLEANUP_INTERVAL.
-    sender.add_periodic_task(
-        DBCLEANUP_INTERVAL, db_cleanup_task.s(), name="db_cleanup_task"
-    )
+#     """
+#     cln_logger = Logger(name="db_cleanup", log_path=LOG_DIR)
+#     cln_logger.info("db_cleanup_task: Cleaning up database...")
 
-    # TODO: Remove later
-    # Calls create_move_leaderboard_task() every LEADERBOARD_INTERVAL.
-    # sender.add_periodic_task(
-    #     LEADERBOARD_INTERVAL,
-    #     create_move_leaderboard_task.s(),
-    #     name="create_move_leaderboard_task",
-    # )
+
+# @app.on_after_finalize.connect
+# def setup_periodic_tasks(sender, **kwargs):
+#     # Calls backup_task() every BACKUP_INTERVAL.
+#     sender.add_periodic_task(BACKUP_INTERVAL, backup_task.s(), name="backup_task")
+
+#     # Calls db_cleanup_task() every DBCLEANUP_INTERVAL.
+#     sender.add_periodic_task(
+#         DBCLEANUP_INTERVAL, db_cleanup_task.s(), name="db_cleanup_task"
+#     )
+
+#     # TODO: Remove later
+#     # Calls create_move_leaderboard_task() every LEADERBOARD_INTERVAL.
+#     # sender.add_periodic_task(
+#     #     LEADERBOARD_INTERVAL,
+#     #     create_move_leaderboard_task.s(),
+#     #     name="create_move_leaderboard_task",
+#     # )

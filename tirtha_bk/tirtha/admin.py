@@ -3,7 +3,7 @@ from django.urls import reverse
 from django.utils.html import mark_safe
 from django.utils.translation import ngettext
 
-from .models import ARK, Contribution, Contributor, Image, Mesh, Run
+from .models import ARK, Contribution, Contributor, Image, Mesh, Run, GSRun
 
 
 class ContributionsInline(admin.TabularInline):
@@ -618,6 +618,63 @@ class RunAdmin(admin.ModelAdmin):
     inlines = [
         ContributorInlineRun
     ]  # ImageInlineRun, FIXME: Too many images lead to 400 (Bad Request)
+
+@admin.register(GSRun)
+class GSRunAdmin(admin.ModelAdmin):
+    def mesh_id_verbose(self, obj):
+        return obj.mesh.verbose_id
+
+    mesh_id_verbose.short_description = "Mesh ID (Verbose)"
+
+    def image_count(self, obj):
+        return obj.images.count()
+
+    image_count.short_description = "Image Count"
+
+    readonly_fields = (
+        "ID",
+        "ark",
+        "mesh_id_verbose",
+        "started_at",
+        "ended_at",
+        "image_count",
+        "status",
+        "directory",
+    )
+    fieldsets = (
+        (
+            "Run Details",
+            {
+                "fields": (
+                    ("ID"),
+                    ("ark"),
+                    ("mesh_id_verbose"),
+                    ("status"),
+                    ("started_at", "ended_at"),
+                    ("directory"),
+                    ("image_count"),
+                    (
+                        "rotaZ",
+                        "rotaX",
+                        "rotaY",
+                    ),  # Used only for <model-viewer>'s orientation
+                )
+            },
+        ),
+    )
+    list_filter = ("status",)
+    list_display = (
+        "ID",
+        "mesh_id_verbose",
+        "image_count",
+        "status",
+        "started_at",
+        "ark",
+    )
+    list_per_page = 50
+    # inlines = [
+    #     ContributorInlineRun
+    # ]  # ImageInlineRun, FIXME: Too many images lead to 400 (Bad Request)
 
 
 @admin.register(ARK)

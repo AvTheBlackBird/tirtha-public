@@ -423,3 +423,80 @@ class Run(models.Model):
         if not self.directory:
             self.directory = f"{self.mesh.ID}/cache/{self.started_at.strftime('%Y-%m-%d-%H-%M-%S')}__{str(self.ID)}"
         super().save(update_fields=["directory"])
+
+
+class GSRun(models.Model):
+    
+    ID = ShortUUIDField(
+        primary_key=True, length=16, max_length=16, verbose_name="GSRun ID"
+    )
+    mesh = models.ForeignKey(
+        Mesh, on_delete=models.CASCADE, verbose_name="GSRun Mesh ID", related_name="gsruns"
+    )
+    ark = models.OneToOneField(
+        ARK,
+        on_delete=models.DO_NOTHING,  # NOTE: DO NOT DELETE SUCCESSFUL RUNS - THIS VIOLATES THE ARK SPEC
+        verbose_name="GSRun ARK",
+        related_name="gsrun",
+        blank=True,
+        null=True,
+    )
+
+    started_at = models.DateTimeField("Start timestamp", auto_now_add=True)
+    ended_at = models.DateTimeField("End timestamp", blank=True, null=True)
+    directory = models.CharField(
+        max_length=200, blank=True, verbose_name="GSRun directory"
+    )
+
+    # Status of the run
+    status_options = [
+        ("Processing", "Processing"),
+        ("Error", "Error"),
+        ("Archived", "Archived"),
+    ]
+    status = models.CharField(
+        max_length=50, blank=False, choices=status_options, default="Processing"
+    )
+
+    # Metadata
+    contributors = models.ManyToManyField(
+        Contributor, verbose_name="Contributors", related_name="gsrun"
+    )
+    images = models.ManyToManyField(Image, verbose_name="Images", related_name="gsrun")
+
+    # Rotation and minimum observation angle for <model-viewer>
+    rotaX = models.IntegerField(
+        default=0, null=True, verbose_name="Rotation about X-axis"
+    )
+    rotaY = models.IntegerField(
+        default=0, null=True, verbose_name="Rotation about Y-axis"
+    )
+    rotaZ = models.IntegerField(
+        default=0, null=True, verbose_name="Rotation about Z-axis"
+    )
+
+    class Meta:
+        ordering = ["-started_at"]
+        verbose_name_plural = "GSRuns"
+
+    def __str__(self):
+        return f"{self.ID}"
+
+    def __repr__(self):
+        return f"""
+                GSRun(
+                    {self.ID},
+                    {self.mesh},
+                    {self.started_at},
+                    {self.ended_at},
+                    {self.directory},
+                    {self.status},
+                    {self.ark.url}
+                )
+                """
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if not self.directory:
+            self.directory = f"{self.mesh.ID}/gscache/{self.started_at.strftime('%Y-%m-%d-%H-%M-%S')}__{str(self.ID)}"
+        super().save(update_fields=["directory"])

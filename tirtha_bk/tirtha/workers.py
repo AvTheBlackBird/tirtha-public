@@ -24,16 +24,22 @@ from silence_tensorflow import silence_tensorflow  # To suppress TF warnings
 # silence_tensorflow()  # To suppress TF warnings
 
 # Local imports
-from tirtha.models import ARK, Contribution, Image, Mesh, Run
+from tirtha.models import ARK, Contribution, Image, Mesh, Run, GSRun
 
 from .alicevision import AliceVision
 from .utils import Logger
 from .utilsark import generate_noid, noid_check_digit
 
+from .preprocessing import Convert
+from .optimization import Optimization
+
+
 STATIC = Path(settings.STATIC_ROOT)
 MEDIA = Path(settings.MEDIA_ROOT)
 LOG_DIR = Path(settings.LOG_DIR)
 ARCHIVE_ROOT = Path(settings.ARCHIVE_ROOT)
+GS_SAVE_ITERS = settings.GS_SAVE_ITERS
+GS_MAX_ITER = settings.GS_MAX_ITER
 MESHOPS_MIN_IMAGES = settings.MESHOPS_MIN_IMAGES
 ALICEVISION_DIRPATH = settings.ALICEVISION_DIRPATH
 NSFW_MODEL_DIRPATH = settings.NSFW_MODEL_DIRPATH
@@ -43,6 +49,9 @@ GLTFPACK_PATH = settings.GLTFPACK_PATH
 BASE_URL = settings.BASE_URL
 ARK_NAAN = settings.ARK_NAAN
 ARK_SHOULDER = settings.ARK_SHOULDER
+
+magick_executable = ""  # If you are using ImageMagick
+colmap_executable = "/home/tirthadocker/projects/3dgs-exps/colmap/build/src/colmap/exe/colmap"
 
 
 class MeshOps:
@@ -65,9 +74,10 @@ class MeshOps:
         self.run = run = Run.objects.create(mesh=mesh)
         run.save()  # Creates run directory
         self.runID = runID = run.ID
+        self.runDir = STATIC / "models" / Path(run.directory)
 
         # Set up Logger
-        self.log_path = LOG_DIR / f"MeshOps/{meshID}/"
+        self.log_path = LOG_DIR / f"MeshOps/{meshID}/" / self.runDir.stem
         if not self.log_path.exists():
             self.log_path.mkdir(parents=True, exist_ok=True)
 
@@ -80,7 +90,6 @@ class MeshOps:
 
         # Source (images) & run directories
         self.imageDir = MEDIA / f"models/{meshID}/images/good/"
-        self.runDir = STATIC / "models" / Path(run.directory)
 
         cls.logger.info(f"Created new Run {runID} for mesh {self.meshStr}.")
         cls.logger.info(f"Run directory: {self.runDir}")
@@ -431,7 +440,7 @@ class MeshOps:
         """
         meshStr = self.meshStr
         curr_runID = self.runID
-        arcDir = ARCHIVE_ROOT / self.meshID / "cache" / curr_runID
+        arcDir = ARCHIVE_ROOT / self.meshID / "cache" / self.runDir.stem
 
         self.logger.info(f"Cleaning up runs for mesh {meshStr}.")
         try:
@@ -610,6 +619,7 @@ class ImageOps:
             self.logger.info(
                 f"Accessing DB to get the contribution object for Contribution ID, {contrib_id}..."
             )
+            print(contrib_id)
             self.contribution = Contribution.objects.get(ID=contrib_id)
         except Contribution.DoesNotExist as excep:
             self.logger.error(
@@ -751,6 +761,289 @@ class ImageOps:
         lg.info("Finished updating contribution.")
 
 
+class TrainOps:
+    """
+    Gaussia splatting pipeline
+
+    """
+    def __init__(self, meshID: str, saving_iterations: int):
+        self.meshID = meshID
+        self.saving_iterations = saving_iterations
+        self.mesh = mesh = Mesh.objects.get(ID=meshID)
+        self.meshVID = mesh.verbose_id
+        self.meshStr = f"{self.meshVID} <=> {self.meshID}"  # Used in logging
+
+        # Create new Run
+        self.run = run = GSRun.objects.create(mesh=mesh)
+        run.save()  # Creates run directory
+        self.runID = runID = run.ID
+        self.runDir = STATIC / "models" / Path(run.directory)
+
+        # Set up Logger
+        self.log_path = LOG_DIR / f"TrainOps/{meshID}" / self.runDir.stem
+        if not self.log_path.exists():
+            self.log_path.mkdir(parents=True, exist_ok=True)
+
+        self.cls = cls = self.__class__
+        # NOTE: Attributes with self.__class__ will only work if the class is instantiated.
+        cls.logger = Logger(log_path=self.log_path, name=f"{cls.__name__}_{runID[:8]}")
+        cls.logger.info(
+            f"ID {meshID} has Verbose ID (VID) {self.meshVID}. Using VID for logging."
+        )
+
+        # Source (images) & run directories
+        self.imageDir = MEDIA / f"models/{meshID}/images/good"
+
+        cls.logger.info(f"Created new Run {runID} for training {self.meshStr}.")
+        cls.logger.info(f"Run directory for training: {self.runDir}")
+        cls.logger.info(f"Run log file for training: {cls.logger._log_file}")
+        self._update_mesh_status("Training")
+
+        # Use image filenames (UUIDs in DB) to fetch images & corresponding contributors
+        self.imageFiles = sorted(self.imageDir.glob("*"))
+        self.imageUUIDs = [imageFile.stem for imageFile in self.imageFiles]
+        try:
+            # NOTE: This does not raise an error if the image is not found in the DB
+            # CHECK: Test ain_bulk()
+            self.images = Image.objects.in_bulk(
+                self.imageUUIDs, field_name="ID"
+            ).values()
+            self.contributions = [image.contribution for image in self.images]
+            self.contributors = [
+                contribution.contributor for contribution in self.contributions
+            ]
+
+            # Set the `images` & `contributors` attributes of the Run
+            # CHECK: Test `aset()`
+            run.images.set(self.images)
+            run.contributors.set(self.contributors)
+            run.save()
+            cls.logger.info(
+                f"Set the `images` & `contributors` attributes of Run {runID}."
+            )
+        except Exception as e:
+            self._handle_error(excep=e, caller="Fetching images & contributors")
+
+    def _update_mesh_status(self, status: str):
+        """
+        Updates the mesh status in the DB
+
+        Parameters
+        ----------
+        status : str
+            The status to update the mesh to
+
+        """
+
+        self.mesh.status = status
+        self.mesh.save()  # NOTE: Consider the effect on signals.py when saving Mesh or any other model
+        self.logger.info(
+            f"Updated mesh.status to '{status}' for mesh {self.meshStr}..."
+        )
+    
+    def _update_run_status(self, status: str):
+        """
+        Updates the run status in the DB
+
+        Parameters
+        ----------
+        status : str
+            The status to update the run to
+
+        """
+        self.run.status = status
+        self.run.save()
+        self.logger.info(f"Updated run.status to '{status}' for run {self.runID}...")
+
+    def _handle_error(self, excep: Exception, caller: str):
+        """
+        Handles errors during the worker execution
+
+        Parameters
+        ----------
+        excep : Exception
+            The exception that was raised
+        caller : str
+            The name of the function that raised the exception
+
+        """
+        # Log the error
+        self.logger.error(f"{caller} step failed for mesh {self.meshStr}.")
+        self.logger.error(f"{excep}", exc_info=True)
+
+        # Update statuses to 'Error'
+        self._update_mesh_status("Error")
+        self.run.ended_at = timezone.now()
+        self.run.save()
+        self._update_run_status("Error")
+
+        raise excep
+
+    def preprocess(self):
+        # run the preprocessign pipeline for images
+        process_images = Convert(self.meshID, self.imageDir, self.runDir, self.log_path, colmap_executable, magick_executable)
+        self.logger.info(f"Preprocessing images for mesh {self.meshStr}.")
+        # TODO: Point to Convert's logpath
+
+        process_images._run_all()
+
+    def optimization(self):
+        # TODO: Point to Optimization's logpath
+        # run the optimization pipeline for the dataset
+        optimization = Optimization(self.saving_iterations, self.runDir, self.log_path)
+        self.logger.info(f"Creating GS for mesh {self.meshStr}.")
+
+        optimization._run_all()
+
+    def run_cleanup(self):
+        """
+        Does the following:
+        1. Cleans up older errored-out runs.
+        2. Copies current Gaussian run's .ply to "published".
+        2. Archives current run.
+        NOTE: Errored-out runs are not deleted during their run, but only during the next run.
+        This is done to allow for debugging.
+
+        """
+        meshStr = self.meshStr
+        curr_runID = self.runID
+        arcDir = ARCHIVE_ROOT / self.meshID / "gscache" / self.runDir.stem
+
+        self.logger.info(f"Cleaning up runs for mesh {meshStr}.")
+        try:
+            # 1. Delete errored-out runs
+            self.logger.info(
+                f"Looking up & deleting errored-out runs for mesh {meshStr}..."
+            )
+            runs = GSRun.objects.filter(mesh=self.mesh, status="Error").order_by(
+                "-ended_at"
+            )
+            if len(runs) > 0:
+                for run in runs:
+                    runDir = STATIC / "models" / Path(run.directory)
+                    self.logger.info(
+                        f"GS Run {run.ID} for mesh {meshStr} has errors. Deleting..."
+                    )
+                    shutil.rmtree(runDir)  # Delete folder
+                    run.delete()  # Delete from DB
+                    self.logger.info(f"Deleted run {run.ID} for mesh {meshStr}.")
+            self.logger.info(
+                f"Deleted {len(runs)} errored-out runs for mesh {meshStr}."
+            )
+
+            # 2. Copy current run's .ply to STATIC / "models" / meshID / "published" / run.id.ply
+            self.logger.info(f"Copying .ply for GS run {curr_runID} for mesh {meshStr}...")
+            src = self.runDir / f"output/point_cloud/iteration_{GS_MAX_ITER}/point_cloud.ply"
+            self.arkURL = (
+                f"models/{self.meshID}/published/{self.meshID}_{curr_runID}.ply"
+            )
+            dest = STATIC / self.arkURL
+            shutil.copy2(src, dest)
+            self.logger.info(f"Copied .ply for GS run {curr_runID} for mesh {meshStr}.")
+
+            # 3. Move everything else to arcDir
+            self.logger.info(
+                f"Archiving GS run {curr_runID} for mesh {meshStr} to {arcDir}."
+            )
+            shutil.move(self.runDir, arcDir)  # Move run folder to archive
+            self.run.directory = str(arcDir)  # Update run directory
+            self._update_run_status("Archived")  # Update run status & save
+            self.logger.info(
+                f"Archived run {curr_runID} for mesh {meshStr} to {arcDir}."
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error cleaning up runs for mesh {meshStr}.")
+            self._handle_error(e, "Archiver")
+        self.logger.info(f"Finished cleaning up runs for mesh {meshStr}.")
+
+    def run_ark(self, ark_len=16):
+        """
+        Runs the ark generator to generate a unique ark for the run.
+
+        Parameters
+        ----------
+        ark_len : int
+            Length of the ark to be generated
+            Default: 16
+
+        """
+        arkURL, run, mesh, meshStr = self.arkURL, self.run, self.mesh, self.meshStr
+        naan, shoulder = ARK_NAAN, ARK_SHOULDER
+        run.ended_at = timezone.now()
+
+        # Create metadata
+        self.logger.info(
+            f"Creating metadata for ARK for gaussian splatting run {run.ID} for mesh {meshStr}..."
+        )
+        def_commit = (
+            "This ARK was generated & is managed by Project Tirtha (https://smlab.niser.ac.in/project/tirtha/). "
+            + "We are committed to maintaining this ARK as per our Terms of Use (https://smlab.niser.ac.in/project/tirtha/#terms) "
+            + "and Privacy Policy (https://smlab.niser.ac.in/project/tirtha/#privacy)."
+        )
+
+        metadata = {
+            "monument": {
+                "name": str(mesh.name),
+                "location": f"{mesh.district}, {mesh.state}, {mesh.country}",  # LATE_EXP: f"{mesh.lat}, {mesh.lon}"
+                "verbose_id": str(mesh.verbose_id),
+                "thumbnail": f"{BASE_URL}{mesh.thumbnail.url}",
+                "description": str(mesh.description),
+                "completed": True if mesh.completed else False,
+            },
+            "run": {
+                "ID": str(run.ID),
+                "ended_at": str(run.ended_at),
+                "contributors": list(run.contributors.values_list("name", flat=True)),
+                "images": int(run.images.count()),
+            },
+            "notice": def_commit,
+        }
+        metadata_json = json.dumps(metadata)
+        self.logger.info(
+            f"Created metadata for ARK for gaussian splatting run {run.ID} for mesh {meshStr}..."
+        )
+
+        # Generate ark - NOTE: Adapted from arklet
+        self.logger.info(f"Generating ARK for gaussian splatting run {run.ID} for mesh {meshStr}...")
+        ark, collisions = None, 0
+        while True:
+            noid = generate_noid(ark_len)
+            base_ark_string = f"{naan}{shoulder}{noid}"
+            check_digit = noid_check_digit(base_ark_string)
+            ark_string = f"{base_ark_string}{check_digit}"
+            try:
+                ark = ARK.objects.create(
+                    ark=ark_string,
+                    naan=naan,
+                    shoulder=shoulder,
+                    assigned_name=f"{noid}{check_digit}",
+                    url=f"{BASE_URL}/static/{arkURL}",
+                    metadata=metadata_json,
+                )
+                self.logger.info(f"ARK URL: {BASE_URL}/static/{arkURL}")
+                break
+            except IntegrityError:
+                collisions += 1
+                continue
+        msg = f"Generated ARK for gaussian splatting run {run.ID} for mesh {meshStr} after {collisions} collision(s)."
+        if collisions == 0:
+            self.logger.info(msg)
+        else:
+            self.logger.warning(msg)
+
+        # Update run
+        run.ark = ark
+        run.save()
+        self.arkStr = str(ark_string)
+
+    def _run_all(self):
+        self.preprocess()
+        self.optimization()
+        self.run_cleanup()
+        self.run_ark()
+
+
 """
 Tasks
 
@@ -807,3 +1100,36 @@ def mo_runner(contrib_id: str):
         cons.print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: {e}")
         raise e
     cons.rule("MeshOps Runner End")
+
+
+def to_runner(contrib_id: str):
+    """
+    Runs TrainOps on a `models.Mesh` and publishes the results.
+
+    """
+    contrib = Contribution.objects.get(ID=contrib_id)
+    meshID = str(contrib.mesh.ID)
+    meshVID = str(contrib.mesh.verbose_id)
+
+    cons = Console()  # This appears as normal printed logs in celery logs.
+    cons.rule("TrainOps Runner Start")
+    cons.print(
+        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: Triggered by {contrib.ID} for Mesh {meshVID} <=> {meshID}."
+    )
+    cons.print(
+        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: Starting TrainOps on Mesh {meshVID} <=> {meshID}."
+    )
+    try:
+        tO = TrainOps(meshID=meshID, saving_iterations=GS_SAVE_ITERS)
+        cons.print(f"Check {tO.log_path} for more details.")
+        tO._run_all()
+        cons.print(
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: Finished TrainOps on {meshVID} <=> {meshID}."
+        )  # <----------------
+    except Exception as e:
+        cons.print(
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: ERROR encountered in TrainOps for {meshVID} <=> {meshID}!"
+        )
+        cons.print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: {e}")
+        raise e
+    cons.rule("TrainOps Runner End")

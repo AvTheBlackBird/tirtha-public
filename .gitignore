@@ -34,3 +34,7 @@ todo.md
 *.log
 cert/
 artifacts/
+
+tirtha_bk/tirtha/submodules
+tirtha_bk/tirtha/output
+prod/
