@@ -40,6 +40,7 @@ LOG_DIR = Path(settings.LOG_DIR)
 ARCHIVE_ROOT = Path(settings.ARCHIVE_ROOT)
 GS_SAVE_ITERS = settings.GS_SAVE_ITERS
 GS_MAX_ITER = settings.GS_MAX_ITER
+GS_CONVERTER = settings.GS_CONVERTER
 MESHOPS_MIN_IMAGES = settings.MESHOPS_MIN_IMAGES
 ALICEVISION_DIRPATH = settings.ALICEVISION_DIRPATH
 NSFW_MODEL_DIRPATH = settings.NSFW_MODEL_DIRPATH
@@ -895,6 +896,61 @@ class TrainOps:
 
         optimization._run_all()
 
+    @classmethod  # NOTE: Won't be picklable as a regular method
+    def _serialRunner(cls, cmd: str, log_file: Path):
+        """
+        Run a command serially and log the output
+
+        Parameters
+        ----------
+        cmd : str
+            Command to run
+        log_file : Path
+            Path to the log file
+
+        """
+        logger = Logger(log_file.stem, log_file.parent)
+        log_path = Path(log_file).resolve()
+        try:
+            cls.logger.info(f"Starting command execution. Log file: {log_path}.")
+            logger.info(f"Command:\n{cmd}")
+            output = check_output(cmd, shell=True, stderr=STDOUT)
+            logger.info(f"Output:\n{output.decode().strip()}")
+            cls.logger.info(f"Finished command execution. Log file: {log_path}.")
+        except CalledProcessError as error:
+            logger.error(f"\n{error.output.decode().strip()}")
+            cls.logger.error(
+                f"Error in command execution for {logger.name}. Check log file: {log_path}."
+            )
+            # NOTE: Won't appear in VSCode's Jupyter Notebook (March 2023)
+            error.add_note(f"{logger.name} failed. Check log file: {log_path}.")
+            raise error
+
+    def run_filtering(self):
+    
+        out_path = self.runDir / "filtered/"
+        out_path.mkdir(parents=True, exist_ok=True)
+        cmd_init = f"{GS_CONVERTER} -i "
+
+        opts = "-f 3dgs --density_filter"
+
+        # Decimated mesh only
+        inp = self.runDir / f"output/point_cloud/iteration_{GS_MAX_ITER}/point_cloud.ply"
+        out = out_path / "filtered.ply"
+        cmd = cmd_init + f"{inp} -o {out} {opts}"
+        log_path = self.log_path / f"filtering.log"
+        self.logger.info(f"Running filtering for generated point clouds {self.meshStr}.")
+        self.logger.info(f"Command: {cmd}")
+        self._serialRunner(cmd, log_path)
+
+        # Check if output was produced
+        if not out.is_file():
+            self._handle_error(
+                FileNotFoundError(f"Output not produced for {out}."), "filtering"
+            )
+
+        self.logger.info(f"Finished running obj2gltf for mesh {self.meshStr}.")
+
     def run_cleanup(self):
         """
         Does the following:
@@ -1040,6 +1096,7 @@ class TrainOps:
     def _run_all(self):
         self.preprocess()
         self.optimization()
+        self.run_filtering()
         self.run_cleanup()
         self.run_ark()
 
